@@ -1,2 +1,2 @@
 # mxs_soul_calibur1_arcade
-Imports Models from Soul Calibur 1 on Arcade into 3DS Max
+Maxscript for 3DS Max which Imports Models from Soul Calibur 1 on Arcade
