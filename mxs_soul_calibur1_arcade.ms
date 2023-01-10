@@ -65,22 +65,14 @@
 	Table4 is a list of names which table1 points to, seems 
 	not important for the model
 	
-   Issues    :
-	Faces don't currently form correctly, a decode routine
-	was provided by Spicyjpeg which I believe is working.
+   Changelog :
+   [2022-01-10]
+	spaztron64 pointed out where the 4th face index was, so
+	now faces work. UV and weight support has been added.
 	
-	However it seems I'm missing a flag that tells me when to 
-	build a 3 sided or 4 sided polygon. This lack of
-	functionality results in the model having incorrect face
-	indices, which manifests as missing or extra faces.
+	having some issues with bone rotations still, and normals.
 	
-	Thus to reduce complexity of the current state of the
-	maxscript certain import features are not presently
-	implemented;
-	
-	- [NO] Normals
-	- [NO] UV's (Texture Coodinates)
-	- [NO] Weights
+
 	
 */ --------------------------------------------------------------
 gc()
@@ -149,39 +141,73 @@ rollout sc1mesh "SC1 Mesh" (
 		/*uint32_t*/  	resev2 = 0,
 		/*uint32_t*/  	resev3 = 0,
 		/*uint32_t*/  	resev4 = 0,
-		fn readFace uVar10 param_3:0 = (
+		
+		fn decode32_10_10_10_2 vertInt = (
 			/*
 				decode function from Spicyjpeg
 				
 				uVar10 is a 32 bit value that contains 3 indices
 				bits 0-9 are the index of the first vertex, 10-19 of the second and 20-29 of the third
+				
+				function readFace uVar10 param_3:0
+				local iVar7 = (bit.and uVar10 0x3ff) * 8 + param_3
+				local gte_ldSXY0 = iVar7
+				local gte_ldSXY1 = ((bit.and (bit.shift uVar10 -7) 0x1ff8) + param_3)
+				local gte_ldSXY2 = ((bit.and (bit.shift uVar10 -0x11) 0x1ff8) + param_3)
+				[gte_ldSXY0, gte_ldSXY1, gte_ldSXY2]
 			*/
-			
-			local iVar7 = (bit.and uVar10 0x3ff) * 8 + param_3
-			local gte_ldSXY0 = iVar7
-			local gte_ldSXY1 = ((bit.and (bit.shift uVar10 -7) 0x1ff8) + param_3)
-			local gte_ldSXY2 = ((bit.and (bit.shift uVar10 -0x11) 0x1ff8) + param_3)
-			
-			[gte_ldSXY0, gte_ldSXY1, gte_ldSXY2]
+			local faceA = bit.and vertInt 0x000003FF
+			local faceB = bit.shift (bit.and vertInt 0x000FFC00) -10
+			local faceC = bit.shift (bit.and vertInt 0x3FF00000) -20
+			local flag = bit.shift (bit.and vertInt 0xC0000000) -30
+			#(faceA, faceB, faceC, flag)
+			),
+		
+		fn getFaces use9bit:false = (
+			local faces = #()
+			local num_sides = 1
+			if bit.get GP0_ID 28 do (
+				num_sides = 2
+				)
+			if use9bit then (
+				local tmp = decode32_10_10_10_2(vertex1)
+				faces = #(tmp[1], tmp[2], tmp[3])
+				if num_sides > 1 do (append faces (bit.and GP0_ID 0xFFFF))
+				)
+			else (
+				local j = 1
+				faces = for j = 0 to (num_sides + 1) collect (
+					bit.shift (bit.and vertex1 (bit.shift 0xFF (j * 8))) -(j * 8)
+					)
+				)
+			faces
+			),
+		
+		fn getUvCoord = (
+			local tvertArray = #(
+				[bit.and resev2 0xFF, 255.0 - (bit.shift (bit.and resev2 0xFF00) -8), 0.0] / 255.0,
+				[bit.and resev3 0xFF, 255.0 - (bit.shift (bit.and resev3 0xFF00) -8), 0.0] / 255.0,
+				[bit.and resev4 0xFF, 255.0 - (bit.shift (bit.and resev4 0xFF00) -8), 0.0] / 255.0,
+				[bit.and (bit.shift resev4 -16) 0xFF, 255.0 - (bit.shift resev4 -24), 0.0] / 255.0
+				)
+			if bit.get GP0_ID 28 == false do (deleteItem tvertArray 4)
+			tvertArray
 			),
 		
 		fn read &f size = (
 			local result = false
-			--print (ftell f)
+			--local p = ftell f
 			GP0_ID = readlong f #unsigned
 			if GP0_ID != 0 do (
 				vertex1 = readlong f #unsigned
 				resev0 = readlong f #unsigned
-				resev1 = readlong f #unsigned
+				if size == 28 do (resev1 = readlong f #unsigned)
 				resev2 = readlong f #unsigned
 				resev3 = readlong f #unsigned
-				
-				if size == 28 do (
-					resev4 = readlong f #unsigned
-					)
-				
+				resev4 = readlong f #unsigned
 				result = true
 				)
+			--fseek f (p + size) #seek_set
 			result
 			)
 		)
@@ -264,12 +290,7 @@ rollout sc1mesh "SC1 Mesh" (
 			index = readByte f #unsigned
 			flag = readByte f #unsigned
 			),
-		fn getIndex = (
-			bit.and (index + (bit.shift (bit.and flag 0x0F) 8)) 0x3FF
-			
-			
-			
-			)
+		fn getIndex = (bit.and (index + (bit.shift (bit.and flag 0x0F) 8)) 0x3FF)
 		)
 	
 	struct fmtSC1Mesh_Strip ( -- n * 8 bytes
@@ -600,7 +621,7 @@ rollout sc1mesh "SC1 Mesh" (
 			s
 			),
 		
-		fn build debugFaces:false buildSkeleton:true = (
+		fn build debugFaces:false debugTVerts:false transformVerts:true transformCorrections:true buildSkeleton:true impNormals:false importWeights:true = (
 			
 			-- Convert Bones from Local to World Space
 			local i = 1
@@ -614,7 +635,7 @@ rollout sc1mesh "SC1 Mesh" (
 				tfm.row4 = [table1[i].pos_x, table1[i].pos_y, table1[i].pos_z]
 				append boneTrans tfm
 				)
-			manualBoneFixes(&boneTrans)
+			if chr_index > 0 and transformCorrections do (manualBoneFixes(&boneTrans))
 			for i = 1 to num_bones do (
 				if table1[i].parent > -1 and table1[i].parent != i - 1 do (
 					boneTrans[i] *= boneTrans[table1[i].parent + 1]
@@ -632,70 +653,62 @@ rollout sc1mesh "SC1 Mesh" (
 			local faceArray = #()
 			local faceArray_Debug = #()
 			local faceArray_Debug2 = #()
-			local faces = #()
+			local tvertArray = #()
+			local texCoord = #()
+			
 			for f = 1 to num_faces do (
-				polyType = bit.shift table3[f].GP0_ID -24
-				num_sides = (
-					case polyType of (
-						0x00   : 0
-						--0x24   : 1
-						--0x28   : 1
-						--0x2A   : 1
-						--0x2C   : 2
-						--0x2D   : 1
-						--0x2E   : 1
-						--0x2F   : 1
-						0x38   : 2
-						0x3A   : 1
-						0x34   : 1
-						0x35   : 1
-						0x3C   : 1
-						0x3D   : 2
-						0x3E   : 2
-						0xA8   : 1
-						0xB8   : 1
-						default: (
-							--print (bit.IntAsHex(bit.shift table3[f].GP0_ID -24))
-							if chr_index == 0 then (if bit.and polyType 8 > 0 then (2) else (1))
-							else (if bit.get table3[f].GP0_ID 30 then (1) else (2))
-							)
-						)
-					)
-				if chr_index != 0 then ( -- 9 bits per face
-					face = ((table3[f].readFace table3[f].vertex1 param_3:0) / 8.0)
-					face2 = ((table3[f].readFace table3[f].resev0 param_3:0) / 8.0)
-					faces = #(face[1] as integer, face[2] as integer, face[3] as integer, face2[1] as integer, face2[2] as integer, face2[3] as integer)
-					
-					) else (faces = for j = 0 to (num_sides + 1) collect (bit.shift (bit.and table3[f].vertex1 (bit.shift 0xFF (j * 8))) -(j * 8)))
-				
+				texCoord = table3[f].getUvCoord use9bit:(chr_index > 0)
+				faces = table3[f].getFaces use9bit:(chr_index > 0)
+				num_sides = 0
+				if faces.count > 2 do (num_sides = faces.count - 2)
 				for s = 1 to num_sides do (
 					face = [faces[s], faces[s + 2], faces[s + 1]] + 1 -- get First 3
-					if face[1] == face[2] or face[2] == face[3] or face[3] == face[1] do exit -- stop if the face is degenerate
 					if bit.and s 1 == 1 do (face = [face[1], face[3], face[2]]) -- get second 3
 					for j = 1 to 3 do (if face[j] > max_index do (max_index = face[j]))
 					append faceArray face
+						
+					if bit.and s 1 == 1 then (
+						append tvertArray texCoord[0 + s]
+						append tvertArray texCoord[1 + s]
+						append tvertArray texCoord[2 + s]
+						)
+					else (
+						append tvertArray texCoord[0 + s]
+						append tvertArray texCoord[2 + s]
+						append tvertArray texCoord[1 + s]
+						)
+					
+					
+					
+					
+					
 					if debugFaces do (
 						append faceArray_Debug table3[f].GP0_ID
-						append faceArray_Debug2 num_sides
+						append faceArray_Debug2 f
 						)
 					)
 				)
 			
 			-- Create Vertex Arrays
 			local vertArray = #()
+			local normArray = #()
 			local boneids = #()
 			local vertCounts = #() -- to generate material boundries
 			if max_index > 0 do (
 				max_index += 1
 				vertCounts[num_bones] = 0
 				vertArray[max_index] = [0.0, 0.0, 0.0]
+				if impNormals do (normArray[max_index] = [0.0, 1.0, 0.0])
+				--format "max_index: \t%\n" max_index
 				boneids[max_index] = #()
 				for i = 1 to max_index do (
 					vertArray[i] = [0.0, 0.0, 0.0]
+					if impNormals do (normArray[i] = [0.0, 1.0, 0.0])
 					boneids[i] = #()
 					)
 				local v = 1
 				local num_verts = 0
+				local num_norms = 0
 				local vert_off = 1
 				local vert_pos = 1
 				
@@ -713,13 +726,41 @@ rollout sc1mesh "SC1 Mesh" (
 								append vertArray [0.0, 0.0, 0.0]
 								append boneids[i] (#())
 								)
-							tfm = transMatrix table2[i].position[v].vertex
-							if boneTrans.count > 0 do (tfm *= boneTrans[i])
-							vertArray[vert_pos] += tfm.row4
-							append boneids[vert_pos] vert_pos
+							if transformVerts then (
+								tfm = transMatrix table2[i].position[v].vertex
+								if boneTrans.count > 0 do (tfm *= boneTrans[i])
+								vertArray[vert_pos] += tfm.row4
+								) else (vertArray[vert_pos] = table2[i].position[v].vertex)
+							while vert_pos > boneids.count do (
+								max_index+=1
+								append boneids (#())
+								)
+							append boneids[vert_pos] i
 							)
 						)
 					vertCounts[i] = max_index - 1
+					)
+				if impNormals do (
+					vert_off = 1
+					for i = 1 to num_bones do (
+						num_norms = table2[i].normal.count
+						format "num_norms: \t%\n" num_norms
+						for v = 1 to num_norms do (
+							if (table2[i].normal[v].isCmdPresent()) then (
+								if table2[i].normal[v].flag == 0 do (vert_off += num_norms)
+								)
+							else (
+								vert_pos = table2[i].normal[v].getIndex() + vert_off
+								--if vert_pos > max_index do max_index = vert_pos
+								while vert_pos > normArray.count do (
+									append normArray [0.0, 1.0, 0.0]
+									)
+								tfm = transMatrix table2[i].normal[v].vertex
+								if boneTrans.count > 0 do (tfm *= boneTrans[i])
+								normArray[vert_pos] += tfm.row4
+								)
+							)
+						)
 					)
 				)
 			
@@ -727,7 +768,7 @@ rollout sc1mesh "SC1 Mesh" (
 			max modify mode
 			local boneArray = #()
 			local bn = undefined
-			if buildSkeleton do (
+			if buildSkeleton or importWeights do (
 				for i = 1 to num_bones do (
 					bn = Dummy()
 					bn.wirecolor = yellow
@@ -741,13 +782,21 @@ rollout sc1mesh "SC1 Mesh" (
 						)
 					)
 				)
+			local weights = #()
 			local num_verts = vertArray.count
 			if num_verts > 0 do (
-				local num_weights = 0
-				for i = 1 to num_verts do (
-					num_weights = boneids[i].count
-					--print num_weights
-					if num_weights > 0 do (vertArray[i] /= num_weights)
+				if transformVerts do (
+					weights[num_verts] = 1.0
+					local num_weights = 0
+					for i = 1 to num_verts do (
+						weights[i] = 1.0
+						num_weights = boneids[i].count
+						--print num_weights
+						if num_weights > 0 do (
+							weights[i] = 1.0 / num_weights
+							vertArray[i] /= num_weights
+							)
+						)
 					)
 				local msh = undefined
 				if debugFaces then (
@@ -783,9 +832,21 @@ rollout sc1mesh "SC1 Mesh" (
 							)
 						)
 					
-					msh = mesh vertices:vertArray faces:faceArray materialIDs:matArray
-					select msh
+					
 					with redraw off (
+						if debugTVerts then (
+							msh = mesh vertices:tvertArray faces:(for i = 1 to tvertArray.count / 3 collect [((i - 1) * 3) + 1, ((i - 1) * 3) + 2, ((i - 1) * 3) + 3]) materialIDs:matArray tverts:tvertArray
+							)
+						else (
+							msh = mesh vertices:vertArray faces:faceArray materialIDs:matArray tverts:tvertArray
+							)
+						buildTVFaces msh
+						for i = 1 to tvertArray.count / 3 do (setTVFace msh i [((i - 1) * 3) + 1, ((i - 1) * 3) + 2, ((i - 1) * 3) + 3])
+						msh.backfacecull = on
+						msh.displayByLayer = false
+						msh.wirecolor = random (color 0 0 0) (color 255 255 255)
+						for i = 1 to msh.numfaces do setFaceSmoothGroup msh i 1
+						
 						select msh
 						modPanel.addModToSelection (smooth ()) ui:off
 						msh.modifiers[#Smooth].autosmooth = on
@@ -798,6 +859,92 @@ rollout sc1mesh "SC1 Mesh" (
 								msh.material[i].diffuse = random white black
 								)
 							)
+						if impNormals do (
+							-- doesnt work, maybe the game uses a different set of indices???
+							local normID = #{}
+							local normMod = Edit_Normals()
+							addmodifier msh normMod ui:off
+							normMod.selectBy = 1
+							normMod.displayLength = 0.25
+							for i = 1 to normArray.count do (
+								normID = #{}
+								normMod.ConvertVertexSelection #{i} &normID
+								for j in normID do (normMod.SetNormal j (normalize normArray[i]))
+								normID = undefined
+								)
+							--collapseStack submesh
+							subobjectLevel = 0
+							)
+						if importWeights and transformVerts do (
+							
+							local skinMod = undefined, num_bones = 0, boneMap = #()
+							local numBones = 0, bone_index = 1, bi = #(), bw = #()
+							local bonePal = #(), bneTmp = #()
+							
+							-- apply a skin modifier
+							skinMod = skin()
+							addModifier msh skinMod ui:off
+							
+							-- generate weight pallete by collect bones being used in weight data
+							for i = 1 to num_verts do (
+								for j = 1 to boneids[i].count do (
+									if findItem bonePal boneids[i][j] == 0 do (
+										append bonePal boneids[i][j]
+										)
+									)
+								)
+							
+							-- assign bones to skin modifier, from the weight pallete
+							for i = 1 to bonePal.count do (
+								skinOps.addbone skinMod boneArray[bonePal[i]]  (
+									if i == bonePal.count then 1 else 0
+									)
+								)
+							
+							
+							-- create a bonemap
+							if boneArray.count > 0 do (
+								-- get names of bones in skin list
+								bneTmp[bonePal.count] = ""
+								for i = 1 to bonePal.count do (
+									bneTmp[i] = skinOps.GetBoneName skinMod i 0
+									)
+								-- map boneArray to skin list
+								boneMap[boneArray.count] = 1
+								for i = 1 to boneArray.count do (
+									boneMap[i] = 1 -- default assignment to first bone in skin list
+									bone_index = findItem bneTmp boneArray[i].name
+									if bone_index > 0 do (boneMap[i] = bone_index)
+									)
+								)
+							
+							-- apply weights to skin modifier
+							modPanel.setCurrentObject skinMod
+							for i = 1 to num_verts do (
+								numBones = boneids[i].count
+								bi = #()
+								bw = #()
+								if numBones > 0 then (
+									bi[numBones] = 0
+									bw[numBones] = 0.0
+									for j = 1 to numBones do (
+										bi[j] = boneMap[boneids[i][j]]
+										bw[j] = weights[i]
+										)
+									)
+								else (
+									bi = #(1)
+									bw = #(1.0)
+									)
+								skinOps.ReplaceVertexWeights skinMod i bi bw
+								)
+							
+							if skinOps.isWeightToolOpen skinMod == 0 do (
+								skinOps.WeightTool skinMod
+								)
+							skinMod.filter_vertices = on
+							)
+						
 						)
 					
 					)
@@ -810,13 +957,18 @@ rollout sc1mesh "SC1 Mesh" (
 		)
 	
 	button btn "Import Model" width:120 height:30
+	checkBox chk_clear "Clear Scene on Import" checked:true
+	checkBox chk_skin "Weights" checked:false
+	checkBox chk_bskl "Skeleton" checked:false
 	group "Debug Options" (
-		checkBox chk_clear "Clear Scene on Import" checked:true
-		checkBox chk_bskl "Import Skeleton" checked:false
 		checkBox chk_dface "Individual Faces" checked:false
+		checkBox chk_tvert "Build UV Mesh" checked:false
+		checkBox chk_notrans "Disable Transforms" checked:false
+		checkBox chk_notransfix "Disable Transforms Fixes" checked:false
+		checkBox chk_normls "Apply Normals" checked:false
 		)
 	label lbl1 "Written By: mariokart64n" align:#left
-	label lbl2 "Date: Jan 8, 2023" align:#left
+	label lbl2 "Date: Jan 10, 2023" align:#left
 	
 	local m = fmtSC1Mesh()
 	fn read file clear_scene:true = (
@@ -828,7 +980,8 @@ rollout sc1mesh "SC1 Mesh" (
 				if chk_clear.checked do delete $*
 				m = fmtSC1Mesh()
 				m.read(f)
-				m.build debugFaces:chk_dface.checked buildSkeleton:chk_bskl.checked
+				m.build debugFaces:chk_dface.checked debugTVerts:chk_tvert.checked transformCorrections:(not chk_notransfix.checked) transformVerts:(not chk_notrans.checked) buildSkeleton:chk_bskl.checked impNormals:chk_normls.checked importWeights:chk_skin.checked
+				--m.build debugFaces:false buildSkeleton:false importWeights:false
 				fclose f
 				) else (format "failed to open file {%}\n" file)
 			)
@@ -838,33 +991,33 @@ rollout sc1mesh "SC1 Mesh" (
 	)
 
 CreateDialog sc1mesh
-
 /*
+delete $*
 sc1mesh.read (
-	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\Y106tes.dat" -- RAM DUMP
-	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\xianghua1P_decompressed_fromROM.bin"
-	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\xianghua1P_sword_decompressed.bin"
-	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\0 001_tang_mitu-MODE ARTHOR.dat" -- RAM DUMP
--- 	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\0MITURUGI_c-KATANA_T.dat" -- RAM DUMP
--- 	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\1 003_Texture1-MODEL TAKI.dat" -- RAM DUMP
--- 	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\SE2-NINTOU_1_1.7-0.dat" -- RAM DUMP
--- 	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\2 SE2-MODEL_MAN_3.4- VOLDO.dat" -- RAM DUMP (CRASHES)
--- 	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\BUKI_M1-KATAL_T_M_.dat" -- RAM DUMP
--- 	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\3 006-MODEL_MAN.40-0 SOPHITUA.dat" -- RAM DUMP
--- 	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\8majyo_saiban-006KE.dat" -- RAM DUMP
--- 	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\4 012b-MODEL_MAN_1_1 ASTAROTH.dat" -- RAM DUMP
--- 	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\astaroth2p_decompressed_rom.bin"
--- 	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\8As_Ono-012_buki.8-0.dat" -- RAM DUMP
--- 	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\5 00b_foreign-00B_1_ IVY.dat" -- RAM DUMP
--- 	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\00b_BUKI-BUKI.10-0.dat" -- RAM DUMP
--- 	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\6 007_tang_geek-MODE NIGHTMARE.dat" -- RAM DUMP
--- 	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\nightmare1P_sword_decompressed.bin"
--- 	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\7 Kl1p_f2-MODEL_00.1 KILIK.dat" -- RAM DUMP
--- 	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\00c_BUKI-konbou5x8.dat" -- RAM DUMP
--- 	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\8 Mks1p_g-MODEL_MAN  MAXI.dat" -- RAM DUMP
--- 	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\00c_BUKI-konbou5x8.dat" -- RAM DUMP
--- 	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\9 Fan1p_f-MODEL_MAN  HWANG.dat" -- RAM DUMP
--- 	"C:\\Users\\Corey\\Downloads\\xianghua_astaroth_sc1_arc\\hwang1P_sword_decompressed.bin"
+	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\Y106tes.dat" -- RAM DUMP
+	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\xianghua1P_decompressed_fromROM.bin"
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\xianghua1P_sword_decompressed.bin"
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\0 001_tang_mitu-MODE ARTHOR.dat" -- RAM DUMP
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\0MITURUGI_c-KATANA_T.dat" -- RAM DUMP
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\1 003_Texture1-MODEL TAKI.dat" -- RAM DUMP
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\SE2-NINTOU_1_1.7-0.dat" -- RAM DUMP
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\2 SE2-MODEL_MAN_3.4- VOLDO.dat" -- RAM DUMP (CRASHES)
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\BUKI_M1-KATAL_T_M_.dat" -- RAM DUMP
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\3 006-MODEL_MAN.40-0 SOPHITUA.dat" -- RAM DUMP
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\8majyo_saiban-006KE.dat" -- RAM DUMP
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\4 012b-MODEL_MAN_1_1 ASTAROTH.dat" -- RAM DUMP
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\astaroth2p_decompressed_rom.bin"
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\8As_Ono-012_buki.8-0.dat" -- RAM DUMP
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\5 00b_foreign-00B_1_ IVY.dat" -- RAM DUMP
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\00b_BUKI-BUKI.10-0.dat" -- RAM DUMP
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\6 007_tang_geek-MODE NIGHTMARE.dat" -- RAM DUMP
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\nightmare1P_sword_decompressed.bin"
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\7 Kl1p_f2-MODEL_00.1 KILIK.dat" -- RAM DUMP
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\00c_BUKI-konbou5x8.dat" -- RAM DUMP
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\8 Mks1p_g-MODEL_MAN  MAXI.dat" -- RAM DUMP
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\00c_BUKI-konbou5x8.dat" -- RAM DUMP
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\9 Fan1p_f-MODEL_MAN  HWANG.dat" -- RAM DUMP
+-- 	"E:\\BackUp\\MyCloud4100\\Coding\\Maxscripts\\File IO\\Soul Calibur 1 (Arcade)\\Samples\\hwang1P_sword_decompressed.bin"
 -- 	"C:\\Users\\Corey\\Downloads\\mame0250b_64bit\\dump1.CEM"
 	)
 */
